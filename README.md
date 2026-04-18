@@ -13,7 +13,7 @@ Works alongside **HestiaCP**, **fail2ban**, and **UFW** (when inactive) without 
 - Downloads a curated IP blacklist every 12 hours via cron
 - Loads all IPs into an **ipset** hash table (extremely fast even with 100k+ entries)
 - **iptables** drops all traffic from blacklisted IPs at kernel level
-- On reboot, the ipset is automatically restored via a **systemd service**
+- On reboot, both ipset data **and iptables rules** are automatically restored via a **systemd service** (runs after HestiaCP to prevent rule conflicts)
 - A separate **custom list** (`spam-custom`) lets you add your own IPs manually — it is never overwritten by automatic updates
 
 ### Blacklist source
@@ -33,23 +33,37 @@ bash install.sh
 The installer will:
 1. Install `ipset` and `wget` if not present
 2. Deploy the update script to `/usr/local/bin/update-blacklist.sh`
-3. Create the `spam-custom` ipset for manual entries
-4. Install and enable the systemd boot-restore service
-5. Add a cron job (runs at 00:00 and 12:00)
-6. Run the first update immediately
+3. Deploy the iptables insertion script to `/usr/local/bin/ipset-iptables-insert.sh`
+4. Create the `spam-custom` ipset for manual entries
+5. Install and enable the systemd boot-restore service (restores both ipset and iptables rules)
+6. Add a cron job (runs at 00:00 and 12:00)
+7. Run the first update immediately
 
 ---
 
-## Update
+## Upgrade from v1
 
-To update the installer itself (re-run install):
+If you installed a previous version, simply re-run the installer:
 
 ```bash
 wget -O install.sh https://raw.githubusercontent.com/Komorebihost/hestiacp-ipset-blacklist/main/install.sh
 bash install.sh
 ```
 
-The script is idempotent — safe to run multiple times.
+The installer is idempotent — safe to run multiple times. It will:
+- Update all scripts to the latest version
+- Fix the systemd service to restore **both** ipset and iptables rules after reboot
+- Clean up any legacy services (`spam-custom-iptables.service`)
+- Preserve your existing `spam-custom` entries
+
+### What changed in v2
+
+**Bug fix:** In v1, the systemd service only restored ipset data at boot but did **not** re-insert the iptables rules. Since HestiaCP rebuilds iptables on startup, the ipset lists were loaded but never referenced — meaning **no traffic was actually blocked after a reboot** until the next cron run (up to 12 hours later).
+
+v2 fixes this by:
+- Restoring iptables rules together with ipset data in the systemd service
+- Running the service **after** HestiaCP (`After=hestia.service`) so rules aren't overwritten
+- Extracting iptables insertion into a dedicated script (`ipset-iptables-insert.sh`) reused by all components
 
 ---
 
@@ -163,11 +177,17 @@ wc -l /etc/ipset.conf
 
 ## HestiaCP compatibility note
 
-HestiaCP manages its own iptables rules. If you run `v-update-firewall` manually (e.g. after changing firewall rules in the panel), re-run the update script immediately after to restore the ipset rules:
+HestiaCP manages its own iptables rules. If you run `v-update-firewall` manually (e.g. after changing firewall rules in the panel), the ipset rules will be removed. Re-run the insertion script immediately after:
 
 ```bash
 /usr/local/hestia/bin/v-update-firewall
-/usr/local/bin/update-blacklist.sh
+/usr/local/bin/ipset-iptables-insert.sh
+```
+
+Or use the wrapper script installed automatically:
+
+```bash
+/usr/local/bin/v-update-firewall-wrapper.sh
 ```
 
 ---
@@ -179,10 +199,8 @@ HestiaCP manages its own iptables rules. If you run `v-update-firewall` manually
 crontab -l | grep -v "update-blacklist" | crontab -
 
 # Remove iptables rules
-iptables -D INPUT   -m set --match-set spam-blacklist src -j DROP 2>/dev/null || true
-iptables -D FORWARD -m set --match-set spam-blacklist src -j DROP 2>/dev/null || true
-iptables -D INPUT   -m set --match-set spam-custom src -j DROP 2>/dev/null || true
-iptables -D FORWARD -m set --match-set spam-custom src -j DROP 2>/dev/null || true
+iptables -D INPUT -m set --match-set spam-blacklist src -j DROP 2>/dev/null || true
+iptables -D INPUT -m set --match-set spam-custom src -j DROP 2>/dev/null || true
 
 # Destroy ipsets
 ipset destroy spam-blacklist 2>/dev/null || true
@@ -191,12 +209,31 @@ ipset destroy spam-custom    2>/dev/null || true
 # Remove systemd service
 systemctl disable ipset-restore.service
 rm -f /etc/systemd/system/ipset-restore.service
+rm -f /etc/systemd/system/spam-custom-iptables.service
 systemctl daemon-reload
 
 # Remove files
 rm -f /usr/local/bin/update-blacklist.sh
+rm -f /usr/local/bin/ipset-iptables-insert.sh
+rm -f /usr/local/bin/v-update-firewall-wrapper.sh
+rm -f /usr/local/hestia/data/firewall/ipset-hook.sh
 rm -f /etc/ipset.conf
 ```
+
+---
+
+## Changelog
+
+### v2 (2026-04-18)
+- **Fixed:** iptables rules are now restored after reboot (v1 only restored ipset data)
+- **Fixed:** systemd service runs after HestiaCP to prevent rule conflicts
+- **Added:** dedicated `ipset-iptables-insert.sh` script for reliable rule insertion
+- **Added:** HestiaCP firewall wrapper for `v-update-firewall` compatibility
+- **Removed:** unnecessary FORWARD chain rules (not needed on most hosting servers)
+- **Improved:** installer cleans up legacy services from v1
+
+### v1 (2024)
+- Initial release
 
 ---
 
