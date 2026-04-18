@@ -42,13 +42,13 @@ wget -q --timeout=30 -O "$TMP_FILE" "$BLACKLIST_URL" || exit 1
 
 # Build ipset restore file — much faster than one add per IP
 {
-    echo "create ${TMP_SET} hash:net maxelem 100000"
+    echo "create ${TMP_SET} hash:net maxelem 200000"
     grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]' "$TMP_FILE" | while read -r ip; do
         echo "add ${TMP_SET} ${ip}"
     done
 } > "$TMP_RESTORE"
 
-ipset create "$IPSET_NAME" hash:net maxelem 100000 2>/dev/null || true
+ipset create "$IPSET_NAME" hash:net maxelem 200000 2>/dev/null || true
 ipset destroy "$TMP_SET" 2>/dev/null || true
 ipset restore < "$TMP_RESTORE"
 ipset swap "$TMP_SET" "$IPSET_NAME"
